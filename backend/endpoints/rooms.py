@@ -1,4 +1,3 @@
-import json
 from typing import Dict, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Body, HTTPException, status
@@ -7,8 +6,9 @@ from schema.response import ResponseModel
 from schema.room import Role, Room, RoomMember, RoomRequest, RoomType
 from utils.centrifugo import Events, centrifugo_client
 from utils.db import DataStorage
-from utils.room_utils import ROOM_COLLECTION, get_room, remove_room_member
+from utils.room_utils import get_room, remove_room_member
 from utils.sidebar import sidebar
+from config.settings import settings
 
 router = APIRouter()
 
@@ -54,7 +54,7 @@ async def create_room(
             "closed": False,
         }
 
-    response = await DB.write(ROOM_COLLECTION, data=room_obj.dict())
+    response = await DB.write(settings.ROOM_COLLECTION, data=room_obj.dict())
     if response and response.get("status_code", None) is None:
         room_id = {"room_id": response.get("data").get("object_id")}
 
@@ -127,10 +127,15 @@ async def remove_member(
             detail="user not a member of the room",
         )
 
-    if admin_id not in room_data["room_members"]:
+    if admin_id is not None and admin_id not in room_data["room_members"]:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="admin id specified not a member of the room",
+        )
+
+    if admin_id is not None and member_id == admin_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="cannot remove yourself"
         )
 
     admin_data = room_data["room_members"].get(
@@ -143,6 +148,12 @@ async def remove_member(
             detail="must be an admin to remove member",
         )
 
+    if member_id == room_data["created_by"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="channel owner cannot leave channel, archive channel or make another member owner",
+        )
+
     try:
         result = await remove_room_member(
             org_id=org_id, room_data=room_data, member_id=member_id
@@ -150,12 +161,12 @@ async def remove_member(
 
     except ValueError as value_error:
         raise HTTPException(
-            detail=value_error, status_code=status.HTTP_404_NOT_FOUND
+            detail=str(value_error), status_code=status.HTTP_404_NOT_FOUND
         ) from value_error
 
     except ConnectionError as connect_error:
         raise HTTPException(
-            detail=json.dumps(str(connect_error)),
+            detail=str(connect_error),
             status_code=status.HTTP_424_FAILED_DEPENDENCY,
         ) from connect_error
     else:
@@ -248,7 +259,7 @@ async def join_room(
 
     update_members = {"room_members": room["room_members"]}
     update_response = await DB.update(
-        ROOM_COLLECTION, document_id=room_id, data=update_members
+        settings.ROOM_COLLECTION, document_id=room_id, data=update_members
     )  # updates the room data in the db collection
 
     background_tasks.add_task(
@@ -336,7 +347,7 @@ async def close_conversation(
     data = {"room_members": room["room_members"]}
 
     update_response = await DB.update(
-        ROOM_COLLECTION, document_id=room_id, data=data
+        settings.ROOM_COLLECTION, document_id=room_id, data=data
     )  # updates the room data in the db collection
 
     background_tasks.add_task(
